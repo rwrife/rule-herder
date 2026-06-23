@@ -1,0 +1,23 @@
+# deps
+node_modules/
+
+# build output
+dist/
+*.tsbuildinfo
+
+# logs
+*.log
+npm-debug.log*
+
+# env / local
+.env
+.env.*
+.DS_Store
+
+# test/coverage
+coverage/
+.vitest/
+
+# editor
+.idea/
+.vscode/
