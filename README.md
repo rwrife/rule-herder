@@ -23,17 +23,29 @@ as reality and tells you where the flock scattered.
 
 ```bash
 # once published
-npx rule-herder diff
+npx rule-herder scan
 ```
 
-## Usage (planned)
+Local dev:
 
 ```bash
-rule-herder scan          # list detected agent files in this repo
-rule-herder diff          # report drift between them (human-readable)
-rule-herder diff --json   # machine-readable drift report (for CI / agents)
-rule-herder herd          # interactive reconcile TUI  (M6)
+npm install
+npm run build
+node dist/cli.js scan
 ```
+
+## Usage
+
+```bash
+rule-herder scan           # list detected agent files in this repo (M1 ✅)
+rule-herder scan --json    # machine-readable list
+rule-herder diff           # report drift between them (M4 — planned)
+rule-herder herd           # interactive reconcile TUI (M6 — planned)
+```
+
+`scan` looks for the known agent files in the cwd:
+`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.cursorrules`, `.windsurfrules`,
+`.github/copilot-instructions.md`.
 
 `diff` exits non-zero when drift crosses your threshold, so it drops straight into CI or a
 pre-commit hook.
