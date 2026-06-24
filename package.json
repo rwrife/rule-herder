@@ -1,0 +1,52 @@
+{
+  "name": "rule-herder",
+  "version": "0.0.1",
+  "description": "A sheepdog for your sprawl of AI agent context files.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "rule-herder": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "PLAN.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "lint": "eslint \"src/**/*.ts\"",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "picocolors": "^1.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@typescript-eslint/eslint-plugin": "^7.18.0",
+    "@typescript-eslint/parser": "^7.18.0",
+    "eslint": "^8.57.0",
+    "tsup": "^8.3.0",
+    "typescript": "^5.5.4",
+    "vitest": "^2.1.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "agents",
+    "ai",
+    "cli",
+    "rules",
+    "drift",
+    "markdown"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rwrife/rule-herder.git"
+  }
+}
