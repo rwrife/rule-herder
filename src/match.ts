@@ -57,6 +57,12 @@ export interface MatchOptions {
    * Compared against a Jaccard token-set similarity. Default 0.6.
    */
   rewordedThreshold?: number;
+  /**
+   * Heading-path aliases: canonical key → equivalent normalized heading paths
+   * (`parent > child`, lowercased). When a block's natural key matches a variant,
+   * it is remapped onto the canonical key so differently-worded headings group together.
+   */
+  aliases?: Record<string, string[]>;
 }
 
 /** Split a normalized body into a token set for Jaccard comparison. */
@@ -197,6 +203,17 @@ export function buildDriftReport(
   const rewordedThreshold = options.rewordedThreshold ?? 0.6;
   const sources = inputs.map((i) => i.source);
 
+  // Build variant → canonical lookup once.
+  const aliasLookup = new Map<string, string>();
+  if (options.aliases) {
+    for (const [canonical, variants] of Object.entries(options.aliases)) {
+      for (const v of variants) {
+        if (v) aliasLookup.set(v, canonical);
+      }
+    }
+  }
+  const remap = (key: string): string => aliasLookup.get(key) ?? key;
+
   // Preserve first-seen order of keys for stable output.
   const order: string[] = [];
   const byKey = new Map<
@@ -206,7 +223,7 @@ export function buildDriftReport(
 
   for (const { source, blocks } of inputs) {
     for (const block of blocks) {
-      const key = blockKey(block);
+      const key = remap(blockKey(block));
       let entry = byKey.get(key);
       if (!entry) {
         entry = { headingPath: block.headingPath, members: [], seen: new Set() };
