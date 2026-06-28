@@ -135,4 +135,18 @@ describe("buildDriftReport", () => {
     const loose = buildDriftReport([a, b], { rewordedThreshold: 0.1 });
     expect(loose.groups[0].status).toBe("reworded");
   });
+
+  it("collapses heading aliases into a single group", () => {
+    const a = parse("a.md", "## Rules\nbe nice\n");
+    const b = parse("b.md", "## Guidelines\nbe nice\n");
+    const noAlias = buildDriftReport([a, b]);
+    expect(noAlias.groups).toHaveLength(2);
+
+    const aliased = buildDriftReport([a, b], {
+      aliases: { rules: ["guidelines"] },
+    });
+    expect(aliased.groups).toHaveLength(1);
+    expect(aliased.groups[0].key).toBe("rules");
+    expect(aliased.groups[0].status).toBe("aligned");
+  });
 });

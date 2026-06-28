@@ -42,6 +42,7 @@ rule-herder scan --json    # machine-readable list
 rule-herder diff           # report drift between them (M4 ✅)
 rule-herder diff --json    # machine-readable drift report
 rule-herder diff --threshold 0.3   # exit 1 when overall drift exceeds 0.3
+rule-herder config         # print the effective config (M5 ✅)
 rule-herder herd           # interactive reconcile TUI (M6 — planned)
 ```
 
@@ -51,6 +52,35 @@ rule-herder herd           # interactive reconcile TUI (M6 — planned)
 
 `diff` exits non-zero when drift crosses your threshold, so it drops straight into CI or a
 pre-commit hook.
+
+## Configuration (M5 ✅)
+
+Drop a `.ruleherder.json` at the project root to override the defaults. Every field is
+optional.
+
+```json
+{
+  "extends": ["docs/AGENTS.md"],
+  "ignore": ["CLAUDE.md"],
+  "aliases": {
+    "rules": ["Guidelines", "Conventions > Rules"]
+  },
+  "thresholds": { "drift": 0.25, "reworded": 0.55 }
+}
+```
+
+| Field | What it does |
+| --- | --- |
+| `files` | Replace the default candidate list outright. |
+| `extends` | Add extra paths to the default candidate list. |
+| `ignore` | Drop specific paths from detection. |
+| `aliases` | `canonical → [variant heading paths]`. Paths are case-insensitive and use `Parent > Child`. Equivalents collapse into one drift group. |
+| `thresholds.drift` | Overall drift threshold (`diff` exits 1 above this). Default `0.2`. |
+| `thresholds.reworded` | Body similarity above which two blocks are "reworded" instead of "conflict". Default `0.6`. |
+
+Flags override config: `--threshold` beats `thresholds.drift`, `--config <path>` points at
+a non-default config file. Run `rule-herder config` to print the fully-resolved config
+rule-herder is actually using.
 
 ## Roadmap
 

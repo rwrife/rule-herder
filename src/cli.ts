@@ -6,6 +6,7 @@ import { detectAgentFiles } from "./detect.js";
 import { parseBlocks } from "./parse.js";
 import { buildDriftReport } from "./match.js";
 import { renderHuman, renderJson } from "./report.js";
+import { loadConfig, type LoadedConfig } from "./config.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json") as { version: string };
@@ -13,10 +14,22 @@ const pkg = require("../package.json") as { version: string };
 interface ScanOptions {
   cwd: string;
   json?: boolean;
+  config?: string;
+}
+
+async function loadEffectiveConfig(
+  cwd: string,
+  configPath?: string,
+): Promise<LoadedConfig> {
+  return loadConfig({ cwd, configPath });
 }
 
 export async function runScan(opts: ScanOptions): Promise<number> {
-  const files = await detectAgentFiles({ cwd: opts.cwd });
+  const cfg = await loadEffectiveConfig(opts.cwd, opts.config);
+  const ignore = new Set(cfg.ignore);
+  const files = (
+    await detectAgentFiles({ cwd: opts.cwd, candidates: cfg.files })
+  ).filter((f) => !ignore.has(f.relPath));
 
   if (opts.json) {
     process.stdout.write(
@@ -53,7 +66,8 @@ export interface DiffOptions {
   cwd: string;
   json?: boolean;
   color?: boolean;
-  threshold: number;
+  threshold?: number;
+  config?: string;
 }
 
 function isPlainRulesFile(relPath: string): boolean {
@@ -62,8 +76,14 @@ function isPlainRulesFile(relPath: string): boolean {
 }
 
 export async function runDiff(opts: DiffOptions): Promise<number> {
-  const files = await detectAgentFiles({ cwd: opts.cwd });
-  const threshold = Number.isFinite(opts.threshold) ? opts.threshold : 0.2;
+  const cfg = await loadEffectiveConfig(opts.cwd, opts.config);
+  const ignore = new Set(cfg.ignore);
+  const files = (
+    await detectAgentFiles({ cwd: opts.cwd, candidates: cfg.files })
+  ).filter((f) => !ignore.has(f.relPath));
+  const threshold = Number.isFinite(opts.threshold)
+    ? (opts.threshold as number)
+    : cfg.thresholds.drift;
 
   if (files.length === 0) {
     if (opts.json) {
@@ -94,7 +114,10 @@ export async function runDiff(opts: DiffOptions): Promise<number> {
     }),
   );
 
-  const report = buildDriftReport(inputs);
+  const report = buildDriftReport(inputs, {
+    rewordedThreshold: cfg.thresholds.reworded,
+    aliases: cfg.aliases,
+  });
 
   if (opts.json) {
     process.stdout.write(renderJson(report, { threshold }));
@@ -120,11 +143,11 @@ export function buildProgram(): Command {
     .option("--cwd <path>", "directory to scan", process.cwd())
     .option("--json", "emit machine-readable JSON", false)
     .option("--no-color", "disable ANSI color in human output")
+    .option("--config <path>", "path to a .ruleherder.json (defaults to cwd)")
     .option(
       "--threshold <n>",
-      "overall drift threshold; exit 1 when exceeded (0..1)",
+      "overall drift threshold; exit 1 when exceeded (0..1). Overrides config.",
       (v) => Number(v),
-      0.2,
     )
     .action(async (opts: DiffOptions) => {
       const code = await runDiff(opts);
@@ -136,9 +159,20 @@ export function buildProgram(): Command {
     .description("list detected agent files in the current directory")
     .option("--cwd <path>", "directory to scan", process.cwd())
     .option("--json", "emit machine-readable JSON", false)
+    .option("--config <path>", "path to a .ruleherder.json (defaults to cwd)")
     .action(async (opts: ScanOptions) => {
       const code = await runScan(opts);
       process.exitCode = code;
+    });
+
+  program
+    .command("config")
+    .description("print the effective rule-herder config")
+    .option("--cwd <path>", "directory to scan", process.cwd())
+    .option("--config <path>", "path to a .ruleherder.json (defaults to cwd)")
+    .action(async (opts: { cwd: string; config?: string }) => {
+      const cfg = await loadEffectiveConfig(opts.cwd, opts.config);
+      process.stdout.write(JSON.stringify(cfg, null, 2) + "\n");
     });
 
   return program;
