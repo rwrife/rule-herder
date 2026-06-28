@@ -43,7 +43,12 @@ rule-herder diff           # report drift between them (M4 ✅)
 rule-herder diff --json    # machine-readable drift report
 rule-herder diff --threshold 0.3   # exit 1 when overall drift exceeds 0.3
 rule-herder config         # print the effective config (M5 ✅)
-rule-herder herd           # interactive reconcile TUI (M6 — planned)
+rule-herder herd           # dry-run reconcile: who would overwrite whom (M6, in progress)
+rule-herder herd --apply   # actually rewrite drifted blocks to the winner
+rule-herder herd --pick longest --apply        # pick longest body as winner
+rule-herder herd --pick source=AGENTS.md --apply  # pick a specific file as truth
+rule-herder herd --target CLAUDE.md --apply    # only rewrite this target file
+rule-herder herd --apply --backup              # write <file>.bak before overwriting
 ```
 
 `scan` looks for the known agent files in the cwd:
@@ -52,6 +57,19 @@ rule-herder herd           # interactive reconcile TUI (M6 — planned)
 
 `diff` exits non-zero when drift crosses your threshold, so it drops straight into CI or a
 pre-commit hook.
+
+`herd` reconciles drift non-interactively (the Ink TUI is the next slice on top of this):
+it picks a winning version per drifted group and rewrites every other source's matching
+block body to match. Defaults are safe — dry-run unless `--apply`, and `--backup` snapshots
+`<file>.bak` next to each modified file. Pick strategies:
+
+- `--pick newest` (default) — newest source-file mtime wins.
+- `--pick longest` — longest block body wins.
+- `--pick source=<path>` — that file is the source of truth.
+
+Only `conflict` and `reworded` groups are touched. `missing` groups (rule present in only
+one source) are reported in the skipped list and left alone — auto-inserting new blocks is
+the interactive TUI's job.
 
 ## Configuration (M5 ✅)
 

@@ -7,6 +7,12 @@ import { parseBlocks } from "./parse.js";
 import { buildDriftReport } from "./match.js";
 import { renderHuman, renderJson } from "./report.js";
 import { loadConfig, type LoadedConfig } from "./config.js";
+import {
+  planHerd,
+  applyHerd,
+  summarizePlan,
+  type PickStrategy,
+} from "./herd.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json") as { version: string };
@@ -166,6 +172,33 @@ export function buildProgram(): Command {
     });
 
   program
+    .command("herd")
+    .description(
+      "reconcile drifted blocks: pick a winning version and rewrite the others",
+    )
+    .option("--cwd <path>", "directory to scan", process.cwd())
+    .option("--config <path>", "path to a .ruleherder.json (defaults to cwd)")
+    .option(
+      "--pick <strategy>",
+      "how to pick the winning block: newest|longest|source=<path>",
+      "newest",
+    )
+    .option(
+      "--target <path>",
+      "only rewrite this target file (repeatable)",
+      (val: string, prev: string[] = []) => prev.concat(val),
+      [] as string[],
+    )
+    .option("--apply", "actually write changes (default is dry-run)", false)
+    .option("--backup", "write <file>.bak before overwriting", false)
+    .option("--json", "emit machine-readable JSON plan", false)
+    .option("--no-color", "disable ANSI color in human output")
+    .action(async (opts: HerdCliOptions) => {
+      const code = await runHerd(opts);
+      process.exitCode = code;
+    });
+
+  program
     .command("config")
     .description("print the effective rule-herder config")
     .option("--cwd <path>", "directory to scan", process.cwd())
@@ -176,6 +209,128 @@ export function buildProgram(): Command {
     });
 
   return program;
+}
+
+export interface HerdCliOptions {
+  cwd: string;
+  config?: string;
+  pick: string;
+  target: string[];
+  apply?: boolean;
+  backup?: boolean;
+  json?: boolean;
+  color?: boolean;
+}
+
+function parsePickStrategy(raw: string): PickStrategy {
+  if (raw === "newest" || raw === "longest") return { kind: raw };
+  const m = /^source=(.+)$/.exec(raw);
+  if (m) return { kind: "source", source: m[1] };
+  throw new Error(
+    `invalid --pick value '${raw}'. Expected newest|longest|source=<path>.`,
+  );
+}
+
+export async function runHerd(opts: HerdCliOptions): Promise<number> {
+  const cfg = await loadEffectiveConfig(opts.cwd, opts.config);
+  const ignore = new Set(cfg.ignore);
+  const files = (
+    await detectAgentFiles({ cwd: opts.cwd, candidates: cfg.files })
+  ).filter((f) => !ignore.has(f.relPath));
+
+  if (files.length < 2) {
+    const msg = pc.yellow(
+      "🐕 need at least two agent files to reconcile — nothing to herd.\n",
+    );
+    if (opts.json) {
+      process.stdout.write(
+        JSON.stringify({ replacements: [], skipped: [], writes: [] }, null, 2) +
+          "\n",
+      );
+    } else {
+      process.stdout.write(msg);
+    }
+    return 0;
+  }
+
+  const inputs = await Promise.all(
+    files.map(async (f) => {
+      const text = await fs.readFile(f.absPath, "utf8");
+      const blocks = parseBlocks(f.relPath, text, {
+        plain: isPlainRulesFile(f.relPath),
+      });
+      return { source: f.relPath, blocks };
+    }),
+  );
+
+  const report = buildDriftReport(inputs, {
+    rewordedThreshold: cfg.thresholds.reworded,
+    aliases: cfg.aliases,
+  });
+
+  const pick = parsePickStrategy(opts.pick ?? "newest");
+  const targets = opts.target && opts.target.length > 0 ? opts.target : undefined;
+  const plan = await planHerd(report, {
+    pick,
+    targets,
+    cwd: opts.cwd,
+  });
+
+  let writes: { target: string; backup?: string }[] = [];
+  if (opts.apply) {
+    const result = await applyHerd(plan, {
+      pick,
+      targets,
+      cwd: opts.cwd,
+      backup: opts.backup,
+    });
+    writes = result.writes;
+  }
+
+  if (opts.json) {
+    process.stdout.write(
+      JSON.stringify(
+        {
+          mode: opts.apply ? "apply" : "dry-run",
+          summary: summarizePlan(plan),
+          replacements: plan.replacements,
+          skipped: plan.skipped,
+          writes,
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    return 0;
+  }
+
+  const noColor = opts.color === false;
+  const c = (fn: (s: string) => string, s: string) => (noColor ? s : fn(s));
+  const sum = summarizePlan(plan);
+  const verb = opts.apply ? "applied" : "would apply";
+  process.stdout.write(
+    c(pc.bold, `🐕 herd ${opts.apply ? "reconcile" : "dry-run"}\n`),
+  );
+  process.stdout.write(
+    `   ${verb} ${sum.changes} change${sum.changes === 1 ? "" : "s"} across ${sum.files} file${sum.files === 1 ? "" : "s"} (${sum.skipped} group${sum.skipped === 1 ? "" : "s"} skipped)\n`,
+  );
+  for (const r of plan.replacements) {
+    const heading = r.headingPath.length > 0 ? r.headingPath.join(" > ") : "(preamble)";
+    process.stdout.write(
+      `  ${c(pc.cyan, "→")} ${r.target} ${c(pc.dim, `[${heading}]`)} ${c(pc.dim, `← ${r.winnerSource}`)}\n`,
+    );
+  }
+  if (opts.apply) {
+    for (const w of writes) {
+      const tail = w.backup ? c(pc.dim, ` (backup: ${w.backup})`) : "";
+      process.stdout.write(`  ${c(pc.green, "✓")} wrote ${w.target}${tail}\n`);
+    }
+  } else if (plan.replacements.length > 0) {
+    process.stdout.write(
+      c(pc.dim, "   (dry-run — pass --apply to write changes)\n"),
+    );
+  }
+  return 0;
 }
 
 // CLI entrypoint (only when executed, not when imported by tests).
