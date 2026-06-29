@@ -74,6 +74,7 @@ export interface DiffOptions {
   color?: boolean;
   threshold?: number;
   config?: string;
+  woof?: boolean;
 }
 
 function isPlainRulesFile(relPath: string): boolean {
@@ -129,7 +130,11 @@ export async function runDiff(opts: DiffOptions): Promise<number> {
     process.stdout.write(renderJson(report, { threshold }));
   } else {
     process.stdout.write(
-      renderHuman(report, { noColor: opts.color === false, threshold }),
+      renderHuman(report, {
+        noColor: opts.color === false,
+        threshold,
+        woof: opts.woof === true,
+      }),
     );
   }
 
@@ -154,6 +159,11 @@ export function buildProgram(): Command {
       "--threshold <n>",
       "overall drift threshold; exit 1 when exceeded (0..1). Overrides config.",
       (v) => Number(v),
+    )
+    .option(
+      "--woof",
+      "escalating sheepdog commentary. Cosmetic; ignored with --json.",
+      false,
     )
     .action(async (opts: DiffOptions) => {
       const code = await runDiff(opts);

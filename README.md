@@ -42,6 +42,7 @@ rule-herder scan --json    # machine-readable list
 rule-herder diff           # report drift between them (M4 ✅)
 rule-herder diff --json    # machine-readable drift report
 rule-herder diff --threshold 0.3   # exit 1 when overall drift exceeds 0.3
+rule-herder diff --woof    # add escalating sheepdog commentary (cosmetic; ignored with --json)
 rule-herder config         # print the effective config (M5 ✅)
 rule-herder herd           # dry-run reconcile: who would overwrite whom (M6, in progress)
 rule-herder herd --apply   # actually rewrite drifted blocks to the winner
