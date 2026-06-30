@@ -16,6 +16,38 @@ export interface HumanRenderOptions {
   noColor?: boolean;
   /** Drift threshold; rendered alongside the overall score for context. */
   threshold?: number;
+  /** Append escalating sheepdog commentary (`--woof` nag mode). */
+  woof?: boolean;
+}
+
+/**
+ * Tiered sheepdog commentary based on overall drift + conflict density.
+ * Pure function of the report so it's trivial to snapshot-test. Each tier returns
+ * a single line that escalates from contented woof to feral howl as drift climbs.
+ */
+export function renderWoof(report: DriftReport): string {
+  if (report.sources.length === 0) {
+    return "🐕 *tail wags faintly* — no flock, no problem.";
+  }
+  const conflicts = report.groups.filter((g) => g.status === "conflict").length;
+  const missing = report.groups.filter((g) => g.status === "missing").length;
+  const d = report.overall;
+  if (d === 0 && conflicts === 0 && missing === 0) {
+    return "🐕 *contented woof* — the flock is tight, every sheep accounted for.";
+  }
+  if (d < 0.15) {
+    return "🐕 *light boof* — a sheep or two wandering, nothing the dog can't nip back in line.";
+  }
+  if (d < 0.34) {
+    return `🐕 *bark!* — ${conflicts} conflict${conflicts === 1 ? "" : "s"} and ${missing} stray${missing === 1 ? "" : "s"}. Get back in the paddock.`;
+  }
+  if (d < 0.6) {
+    return `🐕🐕 *BARK BARK* — herd's scattering. ${conflicts} loud disagreement${conflicts === 1 ? "" : "s"}; the dog is panting now.`;
+  }
+  if (d < 0.85) {
+    return `🐕💢 *GROWL* — this is not a flock, it's a riot. ${conflicts} conflicts, ${missing} missing. Pick a truth and herd it.`;
+  }
+  return `🐺 *AWOOOOO* — the sheepdog has gone feral. ${conflicts} conflicts, ${missing} missing, drift ${d.toFixed(2)}. Abandon the pasture.`;
 }
 
 const STATUS_GLYPH: Record<GroupStatus, string> = {
@@ -123,6 +155,18 @@ export function renderHuman(
     );
   } else {
     lines.push(overallLine);
+  }
+
+  if (options.woof) {
+    const woof = renderWoof(report);
+    const woofColor =
+      report.overall === 0
+        ? c.green
+        : report.overall < 0.34
+          ? c.yellow
+          : c.red;
+    lines.push("");
+    lines.push(woofColor(woof));
   }
 
   return lines.join("\n") + "\n";

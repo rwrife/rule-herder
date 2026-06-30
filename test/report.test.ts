@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { parseBlocks } from "../src/parse.js";
 import { buildDriftReport } from "../src/match.js";
+import type { DriftGroup } from "../src/match.js";
 import { renderHuman, renderJson } from "../src/report.js";
 
 function sampleReport() {
@@ -72,5 +73,64 @@ describe("renderJson", () => {
     const json = JSON.parse(renderJson(sampleReport()));
     expect(json.threshold).toBeNull();
     expect(json.exceedsThreshold).toBe(false);
+  });
+});
+import { renderWoof } from "../src/report.js";
+
+describe("renderWoof", () => {
+  it("contented woof on an empty pasture", () => {
+    const line = renderWoof({ sources: [], groups: [], pairs: [], overall: 0 });
+    expect(line).toMatch(/tail wags faintly/);
+  });
+
+  it("contented woof when everything is aligned", () => {
+    const a = parseBlocks("AGENTS.md", "# Rules\n## Style\nuse two spaces\n");
+    const b = parseBlocks("CLAUDE.md", "# Rules\n## Style\nuse two spaces\n");
+    const report = buildDriftReport([
+      { source: "AGENTS.md", blocks: a },
+      { source: "CLAUDE.md", blocks: b },
+    ]);
+    expect(renderWoof(report)).toMatch(/contented woof/);
+  });
+
+  it("escalates as drift climbs", () => {
+    const mk = (overall: number) =>
+      renderWoof({
+        sources: ["a", "b"],
+        groups: [
+          {
+            key: "k",
+            headingPath: ["x"],
+            status: "conflict",
+            score: overall,
+            members: [],
+            missingFrom: [],
+          } as unknown as DriftGroup,
+        ],
+        pairs: [],
+        overall,
+      });
+    expect(mk(0.1)).toMatch(/light boof/);
+    expect(mk(0.25)).toMatch(/bark!/);
+    expect(mk(0.5)).toMatch(/BARK BARK/);
+    expect(mk(0.7)).toMatch(/GROWL/);
+    expect(mk(0.95)).toMatch(/AWOOOOO/);
+  });
+
+  it("is appended to renderHuman when --woof is set", () => {
+    const out = renderHuman(sampleReport(), {
+      noColor: true,
+      threshold: 0.2,
+      woof: true,
+    });
+    expect(out).toMatch(/Overall drift:/);
+    // last non-empty line should be the woof commentary
+    const lines = out.trim().split("\n");
+    expect(lines[lines.length - 1]).toMatch(/(woof|bark|growl|awooooo|boof)/i);
+  });
+
+  it("is omitted from renderHuman by default", () => {
+    const out = renderHuman(sampleReport(), { noColor: true, threshold: 0.2 });
+    expect(out).not.toMatch(/woof|bark|growl|awooooo|boof/i);
   });
 });
