@@ -1,0 +1,152 @@
+name: "rule-herder drift check"
+description: "Run rule-herder diff to fail builds (or comment on PRs) when agent rule files drift."
+author: "rule-herder"
+branding:
+  icon: "git-pull-request"
+  color: "yellow"
+
+inputs:
+  version:
+    description: "rule-herder version to run via npx (e.g. 0.1.0, 'latest', or a git ref). Use 'local' to run the version checked into the repo."
+    required: false
+    default: "latest"
+  working-directory:
+    description: "Directory to run the drift check in (defaults to the repo root)."
+    required: false
+    default: "."
+  threshold:
+    description: "Drift threshold (0-1). Forwarded as --threshold. Leave empty to use config / default."
+    required: false
+    default: ""
+  config:
+    description: "Path to a .ruleherder.json config file. Forwarded as --config."
+    required: false
+    default: ""
+  json:
+    description: "Emit machine-readable JSON output (still fails on drift)."
+    required: false
+    default: "false"
+  comment-on-pr:
+    description: "When true and run on a pull_request, post the drift report as a sticky PR comment."
+    required: false
+    default: "false"
+  fail-on-drift:
+    description: "When false, never fail the job even if drift exceeds the threshold."
+    required: false
+    default: "true"
+  node-version:
+    description: "Node.js version to set up. Set to 'skip' to reuse an existing Node install."
+    required: false
+    default: "20"
+
+outputs:
+  exit-code:
+    description: "Exit code returned by `rule-herder diff` (0 = clean, non-zero = drift)."
+    value: ${{ steps.run.outputs.exit-code }}
+  report:
+    description: "Captured stdout of the drift report."
+    value: ${{ steps.run.outputs.report }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Node.js
+      if: ${{ inputs.node-version != 'skip' }}
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - name: Run rule-herder diff
+      id: run
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        RH_VERSION: ${{ inputs.version }}
+        RH_THRESHOLD: ${{ inputs.threshold }}
+        RH_CONFIG: ${{ inputs.config }}
+        RH_JSON: ${{ inputs.json }}
+      run: |
+        set -uo pipefail
+
+        args=("diff")
+        if [ "${RH_JSON}" = "true" ]; then
+          args+=("--json")
+        fi
+        if [ -n "${RH_THRESHOLD}" ]; then
+          args+=("--threshold" "${RH_THRESHOLD}")
+        fi
+        if [ -n "${RH_CONFIG}" ]; then
+          args+=("--config" "${RH_CONFIG}")
+        fi
+
+        if [ "${RH_VERSION}" = "local" ]; then
+          if [ -f package.json ]; then
+            npm install --no-audit --no-fund
+            npm run build --if-present
+          fi
+          cmd=(node ./dist/cli.js)
+        else
+          cmd=(npx -y "rule-herder@${RH_VERSION}")
+        fi
+
+        echo "::group::rule-herder ${args[*]}"
+        set +e
+        "${cmd[@]}" "${args[@]}" | tee rule-herder-report.txt
+        status=${PIPESTATUS[0]}
+        set -e
+        echo "::endgroup::"
+
+        echo "exit-code=${status}" >> "$GITHUB_OUTPUT"
+        {
+          echo "report<<RULE_HERDER_EOF"
+          cat rule-herder-report.txt
+          echo "RULE_HERDER_EOF"
+        } >> "$GITHUB_OUTPUT"
+
+        exit 0
+
+    - name: Comment on PR
+      if: ${{ inputs.comment-on-pr == 'true' && github.event_name == 'pull_request' }}
+      uses: actions/github-script@v7
+      env:
+        RH_EXIT: ${{ steps.run.outputs.exit-code }}
+        RH_REPORT: ${{ steps.run.outputs.report }}
+      with:
+        script: |
+          const marker = '<!-- rule-herder-comment -->';
+          const exitCode = process.env.RH_EXIT || '0';
+          const report = (process.env.RH_REPORT || '').trim();
+          const status = exitCode === '0'
+            ? '✅ flock aligned — no drift over threshold.'
+            : `🐕 drift detected (exit ${exitCode}). Run \`rule-herder diff\` locally or \`rule-herder herd\` to reconcile.`;
+          const body = [
+            marker,
+            '### rule-herder drift report',
+            '',
+            status,
+            '',
+            '```',
+            report.length ? report : '(no output)',
+            '```',
+          ].join('\n');
+
+          const { owner, repo } = context.repo;
+          const issue_number = context.payload.pull_request.number;
+          const { data: comments } = await github.rest.issues.listComments({ owner, repo, issue_number, per_page: 100 });
+          const existing = comments.find((c) => c.body && c.body.includes(marker));
+          if (existing) {
+            await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+          } else {
+            await github.rest.issues.createComment({ owner, repo, issue_number, body });
+          }
+
+    - name: Enforce drift threshold
+      if: ${{ inputs.fail-on-drift == 'true' }}
+      shell: bash
+      env:
+        RH_EXIT: ${{ steps.run.outputs.exit-code }}
+      run: |
+        if [ "${RH_EXIT}" != "0" ]; then
+          echo "::error::rule-herder reported drift (exit ${RH_EXIT})."
+          exit "${RH_EXIT}"
+        fi

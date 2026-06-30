@@ -1,0 +1,29 @@
+# pre-commit hook for rule-herder.
+#
+# Add to your project's .pre-commit-config.yaml:
+#
+# repos:
+#   - repo: https://github.com/rwrife/rule-herder
+#     rev: main          # or pin to a tag, e.g. v0.1.0
+#     hooks:
+#       - id: rule-herder
+#
+# Requires Node.js >= 18 on PATH. The hook runs `rule-herder diff` and fails
+# the commit when drift exceeds the configured threshold.
+
+- id: rule-herder
+  name: rule-herder drift check
+  description: "Fail the commit if agent rule files have drifted."
+  entry: rule-herder-precommit
+  language: node
+  pass_filenames: false
+  files: "^(AGENTS\\.md|CLAUDE\\.md|GEMINI\\.md|\\.cursorrules|\\.windsurfrules|\\.github/copilot-instructions\\.md|\\.ruleherder\\.json)$"
+  additional_dependencies: []
+
+- id: rule-herder-diff
+  name: rule-herder drift check (npx)
+  description: "Same as `rule-herder` but always runs the latest published version via npx."
+  entry: bash -c 'npx -y rule-herder diff "$@"' --
+  language: system
+  pass_filenames: false
+  files: "^(AGENTS\\.md|CLAUDE\\.md|GEMINI\\.md|\\.cursorrules|\\.windsurfrules|\\.github/copilot-instructions\\.md|\\.ruleherder\\.json)$"
