@@ -1,0 +1,35 @@
+# Example: run rule-herder on every pull request and post a sticky drift comment.
+#
+# Copy this file to .github/workflows/rule-herder.yml in your repo and tweak
+# `version` / `threshold` / `comment-on-pr` to taste.
+name: rule-herder
+
+on:
+  pull_request:
+    paths:
+      - "AGENTS.md"
+      - "CLAUDE.md"
+      - "GEMINI.md"
+      - ".cursorrules"
+      - ".windsurfrules"
+      - ".github/copilot-instructions.md"
+      - ".ruleherder.json"
+  push:
+    branches: [main]
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write # required only when comment-on-pr: 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check agent rule drift
+        uses: rwrife/rule-herder@main
+        with:
+          version: latest        # or pin to a specific release, e.g. '0.1.0'
+          threshold: "0.2"       # fail when overall drift exceeds 0.2
+          comment-on-pr: "true"  # leave a sticky 🐕 comment on the PR
+          fail-on-drift: "true"  # set to 'false' to comment without failing CI

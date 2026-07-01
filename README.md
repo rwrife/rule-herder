@@ -101,6 +101,73 @@ Flags override config: `--threshold` beats `thresholds.drift`, `--config <path>`
 a non-default config file. Run `rule-herder config` to print the fully-resolved config
 rule-herder is actually using.
 
+## CI / pre-commit integration (M-backlog ✅)
+
+Keep drift from sneaking into `main` by wiring `rule-herder diff` into your existing
+checks.
+
+### GitHub Action
+
+A reusable composite action lives at the repo root (`action.yml`). Drop this into
+`.github/workflows/rule-herder.yml`:
+
+```yaml
+name: rule-herder
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write   # only needed when comment-on-pr: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rwrife/rule-herder@main
+        with:
+          version: latest        # or pin to a release tag
+          threshold: "0.2"       # forwarded to --threshold
+          comment-on-pr: "true"  # leave a sticky 🐕 drift comment on PRs
+          fail-on-drift: "true"  # set to 'false' to comment without failing
+```
+
+See [`examples/github-actions/rule-herder.yml`](./examples/github-actions/rule-herder.yml)
+for a copy-pasteable workflow. Action inputs:
+
+| Input | Default | Notes |
+| --- | --- | --- |
+| `version` | `latest` | npm version (or git ref) of rule-herder to run via `npx`. Use `local` to build and run the repo's own checkout. |
+| `working-directory` | `.` | Where to run the check. |
+| `threshold` | _(none)_ | Forwarded as `--threshold`. |
+| `config` | _(none)_ | Path to `.ruleherder.json`. |
+| `json` | `false` | Emit `--json` (still fails on drift). |
+| `comment-on-pr` | `false` | Post / update a sticky drift comment on the PR. |
+| `fail-on-drift` | `true` | Set to `false` to report without failing the job. |
+| `node-version` | `20` | `actions/setup-node` version. Use `skip` to reuse an existing Node. |
+
+Outputs: `exit-code` (the `rule-herder diff` exit status) and `report` (captured stdout).
+
+### pre-commit hook
+
+The repo ships a [pre-commit](https://pre-commit.com) hook manifest. Add to your
+`.pre-commit-config.yaml`:
+
+```yaml
+repos:
+  - repo: https://github.com/rwrife/rule-herder
+    rev: main          # or pin to a release tag
+    hooks:
+      - id: rule-herder
+```
+
+The hook only triggers when an agent rule file (or `.ruleherder.json`) changes, then runs
+`rule-herder diff` and blocks the commit if drift exceeds your threshold. There's also a
+system-language `rule-herder-diff` variant that always pulls the latest release via `npx`
+without building from source.
+
 ## Roadmap
 
 See [`PLAN.md`](./PLAN.md) for the full plan, milestones (M1–M6), and backlog.

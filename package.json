@@ -5,10 +5,14 @@
   "license": "MIT",
   "type": "module",
   "bin": {
-    "rule-herder": "./dist/cli.js"
+    "rule-herder": "./dist/cli.js",
+    "rule-herder-precommit": "./dist/precommit.js"
   },
   "files": [
     "dist",
+    "action.yml",
+    ".pre-commit-hooks.yaml",
+    "examples",
     "README.md",
     "PLAN.md",
     "LICENSE"
