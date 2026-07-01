@@ -13,6 +13,7 @@ import {
   summarizePlan,
   type PickStrategy,
 } from "./herd.js";
+import { writeWeave } from "./weave.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json") as { version: string };
@@ -209,6 +210,33 @@ export function buildProgram(): Command {
     });
 
   program
+    .command("weave")
+    .description(
+      "weave the flock into a single canonical RULES.md source of truth",
+    )
+    .option("--cwd <path>", "directory to scan", process.cwd())
+    .option("--config <path>", "path to a .ruleherder.json (defaults to cwd)")
+    .option(
+      "--pick <strategy>",
+      "how to pick the winning block: newest|longest|source=<path>",
+      "newest",
+    )
+    .option("--out <path>", "output file (defaults to RULES.md)", "RULES.md")
+    .option("--stdout", "print to stdout instead of writing a file", false)
+    .option("--title <text>", "optional H1 title for the woven file")
+    .option(
+      "--only-shared",
+      "skip blocks that only one source file contributed",
+      false,
+    )
+    .option("--no-header", "omit the generated-by header comment")
+    .option("--json", "emit machine-readable JSON summary", false)
+    .action(async (opts: WeaveCliOptions) => {
+      const code = await runWeave(opts);
+      process.exitCode = code;
+    });
+
+  program
     .command("config")
     .description("print the effective rule-herder config")
     .option("--cwd <path>", "directory to scan", process.cwd())
@@ -338,6 +366,111 @@ export async function runHerd(opts: HerdCliOptions): Promise<number> {
   } else if (plan.replacements.length > 0) {
     process.stdout.write(
       c(pc.dim, "   (dry-run — pass --apply to write changes)\n"),
+    );
+  }
+  return 0;
+}
+
+export interface WeaveCliOptions {
+  cwd: string;
+  config?: string;
+  pick: string;
+  out?: string;
+  stdout?: boolean;
+  title?: string;
+  onlyShared?: boolean;
+  header?: boolean;
+  json?: boolean;
+}
+
+export async function runWeave(opts: WeaveCliOptions): Promise<number> {
+  const cfg = await loadEffectiveConfig(opts.cwd, opts.config);
+  const ignore = new Set(cfg.ignore);
+  const files = (
+    await detectAgentFiles({ cwd: opts.cwd, candidates: cfg.files })
+  ).filter((f) => !ignore.has(f.relPath));
+
+  if (files.length === 0) {
+    const msg = pc.yellow(
+      "🐕 no agent files detected — nothing to weave.\n",
+    );
+    if (opts.json) {
+      process.stdout.write(
+        JSON.stringify({ sections: [], skipped: [], writtenTo: null }, null, 2) +
+          "\n",
+      );
+    } else {
+      process.stdout.write(msg);
+    }
+    return 0;
+  }
+
+  const inputs = await Promise.all(
+    files.map(async (f) => {
+      const text = await fs.readFile(f.absPath, "utf8");
+      const blocks = parseBlocks(f.relPath, text, {
+        plain: isPlainRulesFile(f.relPath),
+      });
+      return { source: f.relPath, blocks };
+    }),
+  );
+
+  const report = buildDriftReport(inputs, {
+    rewordedThreshold: cfg.thresholds.reworded,
+    aliases: cfg.aliases,
+  });
+
+  const pick = parsePickStrategy(opts.pick ?? "newest");
+  const outPath = opts.stdout ? undefined : opts.out ?? "RULES.md";
+  const { result, writtenTo } = await writeWeave(report, outPath, {
+    pick,
+    cwd: opts.cwd,
+    onlyShared: opts.onlyShared === true,
+    title: opts.title,
+    omitHeader: opts.header === false,
+  });
+
+  if (opts.stdout) {
+    process.stdout.write(result.markdown);
+    return 0;
+  }
+
+  if (opts.json) {
+    process.stdout.write(
+      JSON.stringify(
+        {
+          writtenTo,
+          sections: result.sections.map((s) => ({
+            key: s.key,
+            headingPath: s.headingPath,
+            winnerSource: s.winnerSource,
+            contributors: s.contributors,
+            missingFrom: s.missingFrom,
+          })),
+          skipped: result.skipped,
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    return 0;
+  }
+
+  process.stdout.write(
+    pc.bold(
+      `🐕 wove ${result.sections.length} section${result.sections.length === 1 ? "" : "s"} into ${writtenTo}\n`,
+    ),
+  );
+  for (const s of result.sections) {
+    const head =
+      s.headingPath.length > 0 ? s.headingPath.join(" > ") : "(preamble)";
+    process.stdout.write(
+      `  ${pc.cyan("→")} ${head} ${pc.dim(`← ${s.winnerSource}`)}\n`,
+    );
+  }
+  if (result.skipped.length > 0) {
+    process.stdout.write(
+      pc.dim(`   (${result.skipped.length} group(s) skipped)\n`),
     );
   }
   return 0;
