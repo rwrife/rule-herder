@@ -270,3 +270,141 @@ export function buildDriftReport(
 
   return { sources, groups, pairs, overall };
 }
+
+/**
+ * Two group keys that a caller (typically the opt-in LLM matcher) has
+ * declared semantically equivalent. Order is irrelevant — the merger uses
+ * union-find internally.
+ */
+export interface EquivalencePair {
+  aKey: string;
+  bKey: string;
+}
+
+/**
+ * Rebuild a `DriftReport` after merging the given `equivalences` (produced by
+ * the opt-in LLM matcher, or any other post-processor). Pure function of its
+ * inputs; the original `report` is not mutated.
+ *
+ * Merge rules:
+ *  - Groups are unioned by `equivalences` using union-find.
+ *  - The merged group keeps the *lowest first-seen order* key + heading path
+ *    from its component groups (stable output).
+ *  - Members from every component group are concatenated, first-seen source
+ *    order preserved; per-source duplicates keep the first-seen block.
+ *  - `status` is re-classified against the same `rewordedThreshold`.
+ *  - `score`, `missingFrom`, pairwise scores, and `overall` are all
+ *    recomputed from the merged groups so downstream renderers/exit-codes
+ *    behave as if the heuristic had produced the merged groups itself.
+ *
+ * Unknown keys in `equivalences` (i.e. keys not present in `report.groups`)
+ * are ignored — the caller is not required to pre-validate.
+ */
+export function mergeGroupsByEquivalence(
+  report: DriftReport,
+  equivalences: readonly EquivalencePair[],
+  options: { rewordedThreshold?: number } = {},
+): DriftReport {
+  const rewordedThreshold = options.rewordedThreshold ?? 0.6;
+  if (equivalences.length === 0 || report.groups.length === 0) {
+    return report;
+  }
+
+  // Union-find over group indices.
+  const n = report.groups.length;
+  const keyToIndex = new Map<string, number>();
+  report.groups.forEach((g, i) => keyToIndex.set(g.key, i));
+  const parent = Array.from({ length: n }, (_, i) => i);
+  const find = (i: number): number => {
+    while (parent[i] !== i) {
+      parent[i] = parent[parent[i]];
+      i = parent[i];
+    }
+    return i;
+  };
+  const union = (a: number, b: number): void => {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra === rb) return;
+    // Attach the higher-index root under the lower-index root so the
+    // merged group's canonical index stays the earliest first-seen one.
+    if (ra < rb) parent[rb] = ra;
+    else parent[ra] = rb;
+  };
+
+  for (const eq of equivalences) {
+    const a = keyToIndex.get(eq.aKey);
+    const b = keyToIndex.get(eq.bKey);
+    if (a === undefined || b === undefined) continue;
+    union(a, b);
+  }
+
+  // Bucket group indices by their union-find root, preserving first-seen order.
+  const bucketOrder: number[] = [];
+  const buckets = new Map<number, number[]>();
+  for (let i = 0; i < n; i++) {
+    const r = find(i);
+    let bucket = buckets.get(r);
+    if (!bucket) {
+      bucket = [];
+      buckets.set(r, bucket);
+      bucketOrder.push(r);
+    }
+    bucket.push(i);
+  }
+
+  const mergedGroups: DriftGroup[] = bucketOrder.map((root) => {
+    const indices = buckets.get(root)!;
+    if (indices.length === 1) {
+      // No merge for this root — reuse the original group as-is.
+      return report.groups[indices[0]];
+    }
+    // Multi-group merge: dedupe members by source (keep first-seen).
+    const seenSources = new Set<string>();
+    const members: GroupMember[] = [];
+    for (const idx of indices) {
+      for (const m of report.groups[idx].members) {
+        if (seenSources.has(m.source)) continue;
+        seenSources.add(m.source);
+        members.push(m);
+      }
+    }
+    const canonical = report.groups[indices[0]];
+    const missingFrom = report.sources.filter((s) => !seenSources.has(s));
+    const status = classifyGroup(members, rewordedThreshold);
+    const score = groupScore(members, report.sources.length);
+    return {
+      key: canonical.key,
+      headingPath: canonical.headingPath,
+      members,
+      missingFrom,
+      status,
+      score,
+    };
+  });
+
+  const pairs: DriftPair[] = [];
+  for (let i = 0; i < report.sources.length; i++) {
+    for (let j = i + 1; j < report.sources.length; j++) {
+      pairs.push({
+        a: report.sources[i],
+        b: report.sources[j],
+        score: pairScore(report.sources[i], report.sources[j], mergedGroups),
+      });
+    }
+  }
+
+  const overall =
+    mergedGroups.length === 0
+      ? 0
+      : clamp01(
+          mergedGroups.reduce((s, g) => s + g.score, 0) / mergedGroups.length,
+        );
+
+  return {
+    sources: report.sources,
+    groups: mergedGroups,
+    pairs,
+    overall,
+  };
+}

@@ -14,6 +14,12 @@ import {
   type PickStrategy,
 } from "./herd.js";
 import { writeWeave } from "./weave.js";
+import {
+  enrichReportWithLLM,
+  OpenAIProvider,
+  type EnrichResult,
+  type LLMProvider,
+} from "./llm.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json") as { version: string };
@@ -76,6 +82,14 @@ export interface DiffOptions {
   threshold?: number;
   config?: string;
   woof?: boolean;
+  llmMatch?: boolean;
+  llmUrl?: string;
+  llmModel?: string;
+  llmKey?: string;
+  llmMinConfidence?: number;
+  llmMaxCandidates?: number;
+  /** Injected in tests; when set, replaces the real provider entirely. */
+  llmProviderOverride?: LLMProvider;
 }
 
 function isPlainRulesFile(relPath: string): boolean {
@@ -127,19 +141,95 @@ export async function runDiff(opts: DiffOptions): Promise<number> {
     aliases: cfg.aliases,
   });
 
+  const llmResult = await maybeEnrichWithLLM(report, opts, cfg);
+  const finalReport = llmResult?.report ?? report;
+
   if (opts.json) {
-    process.stdout.write(renderJson(report, { threshold }));
+    process.stdout.write(renderJson(finalReport, { threshold }));
   } else {
     process.stdout.write(
-      renderHuman(report, {
+      renderHuman(finalReport, {
         noColor: opts.color === false,
         threshold,
         woof: opts.woof === true,
       }),
     );
+    if (llmResult && opts.color !== false) {
+      process.stdout.write(
+        pc.dim(
+          `\n  🤖 llm-match (${llmResult.provider}): ${llmResult.matches.length} match(es) of ${llmResult.candidatesConsidered} candidate(s)\n`,
+        ),
+      );
+    } else if (llmResult) {
+      process.stdout.write(
+        `\n  llm-match (${llmResult.provider}): ${llmResult.matches.length} match(es) of ${llmResult.candidatesConsidered} candidate(s)\n`,
+      );
+    }
   }
 
-  return report.overall > threshold ? 1 : 0;
+  return finalReport.overall > threshold ? 1 : 0;
+}
+
+/**
+ * Build the LLM provider and run enrichment when the caller has opted in.
+ *
+ * **Opt-in rules (belt-and-braces):** the LLM matcher runs only when the user
+ * explicitly passed `--llm-match` on the CLI **or** the loaded config has
+ * `llm.enabled: true`. Otherwise this returns `null` and no network call
+ * happens under any circumstance.
+ */
+async function maybeEnrichWithLLM(
+  report: import("./match.js").DriftReport,
+  opts: DiffOptions,
+  cfg: LoadedConfig,
+): Promise<(EnrichResult & { provider: string }) | null> {
+  const optedIn = opts.llmMatch === true || cfg.llm.enabled === true;
+  if (!optedIn) return null;
+
+  const provider =
+    opts.llmProviderOverride ?? buildLLMProviderFromEnv(opts, cfg);
+  if (!provider) {
+    process.stderr.write(
+      pc.yellow(
+        "rule-herder: --llm-match set but no LLM url/model configured; skipping (set --llm-url/--llm-model, RULE_HERDER_LLM_URL/RULE_HERDER_LLM_MODEL, or llm.{url,model} in .ruleherder.json).\n",
+      ),
+    );
+    return null;
+  }
+
+  const minConfidence =
+    opts.llmMinConfidence ?? cfg.llm.minConfidence;
+  const maxCandidates =
+    opts.llmMaxCandidates ?? cfg.llm.maxCandidates;
+
+  try {
+    const result = await enrichReportWithLLM(report, {
+      provider,
+      minConfidence,
+      maxCandidates,
+    });
+    return { ...result, provider: provider.name };
+  } catch (err) {
+    process.stderr.write(
+      pc.yellow(
+        `rule-herder: LLM matcher failed (${(err as Error).message}); falling back to heuristic-only report.\n`,
+      ),
+    );
+    return null;
+  }
+}
+
+function buildLLMProviderFromEnv(
+  opts: DiffOptions,
+  cfg: LoadedConfig,
+): LLMProvider | null {
+  const url = opts.llmUrl ?? process.env.RULE_HERDER_LLM_URL ?? cfg.llm.url;
+  const model =
+    opts.llmModel ?? process.env.RULE_HERDER_LLM_MODEL ?? cfg.llm.model;
+  const apiKey =
+    opts.llmKey ?? process.env.RULE_HERDER_LLM_KEY ?? cfg.llm.apiKey ?? undefined;
+  if (!url || !model) return null;
+  return new OpenAIProvider({ url, model, apiKey: apiKey ?? undefined });
 }
 
 export function buildProgram(): Command {
@@ -165,6 +255,33 @@ export function buildProgram(): Command {
       "--woof",
       "escalating sheepdog commentary. Cosmetic; ignored with --json.",
       false,
+    )
+    .option(
+      "--llm-match",
+      "opt in to an LLM pass that catches semantically-equivalent rules the heuristic misses (needs --llm-url + --llm-model, RULE_HERDER_LLM_URL/MODEL env, or llm.{url,model} in .ruleherder.json).",
+      false,
+    )
+    .option(
+      "--llm-url <url>",
+      "OpenAI-compatible chat/completions URL. Also RULE_HERDER_LLM_URL.",
+    )
+    .option(
+      "--llm-model <name>",
+      "Model name to send in the request body. Also RULE_HERDER_LLM_MODEL.",
+    )
+    .option(
+      "--llm-key <key>",
+      "API key. Also RULE_HERDER_LLM_KEY. Local backends may not need one.",
+    )
+    .option(
+      "--llm-min-confidence <n>",
+      "drop LLM matches below this confidence (0..1). Default 0.7.",
+      (v) => Number(v),
+    )
+    .option(
+      "--llm-max-candidates <n>",
+      "cap the number of candidate pairs sent to the LLM per run. Default 50.",
+      (v) => Number(v),
     )
     .action(async (opts: DiffOptions) => {
       const code = await runDiff(opts);
