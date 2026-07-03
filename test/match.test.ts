@@ -4,6 +4,7 @@ import {
   buildDriftReport,
   jaccard,
   blockKey,
+  mergeGroupsByEquivalence,
 } from "../src/match.js";
 
 describe("jaccard", () => {
@@ -150,3 +151,98 @@ describe("buildDriftReport", () => {
     expect(aliased.groups[0].status).toBe("aligned");
   });
 });
+
+describe("mergeGroupsByEquivalence", () => {
+  function parse(source: string, content: string) {
+    return { source, blocks: parseBlocks(source, content) };
+  }
+
+  it("returns the report unchanged when there are no equivalences", () => {
+    const a = parse("a.md", "# Style\ntabs\n");
+    const b = parse("b.md", "# Formatting\ntabs\n");
+    const report = buildDriftReport([a, b]);
+    const merged = mergeGroupsByEquivalence(report, []);
+    expect(merged).toBe(report);
+  });
+
+  it("merges two `missing` groups declared equivalent into one aligned group", () => {
+    const a = parse("a.md", "# Style\ntabs everywhere\n");
+    const b = parse("b.md", "# Formatting\ntabs everywhere\n");
+    const report = buildDriftReport([a, b]);
+    // Different headings → two `missing` groups with identical bodies.
+    expect(report.groups).toHaveLength(2);
+    expect(report.groups.every((g) => g.status === "missing")).toBe(true);
+
+    const merged = mergeGroupsByEquivalence(report, [
+      { aKey: "style", bKey: "formatting" },
+    ]);
+    expect(merged.groups).toHaveLength(1);
+    const [g] = merged.groups;
+    expect(g.members.map((m) => m.source).sort()).toEqual(["a.md", "b.md"]);
+    expect(g.status).toBe("aligned");
+    expect(g.missingFrom).toEqual([]);
+    expect(g.score).toBe(0);
+    // Overall drift drops from >0 to 0 once the two `missing` groups fuse.
+    expect(merged.overall).toBe(0);
+    // Pairwise scores recomputed against the merged groups.
+    expect(merged.pairs).toHaveLength(1);
+    expect(merged.pairs[0].score).toBe(0);
+  });
+
+  it("reclassifies as conflict when bodies actually disagree", () => {
+    const a = parse("a.md", "# Style\nalways use tabs\n");
+    const b = parse("b.md", "# Formatting\nprefer spaces and prettier\n");
+    const report = buildDriftReport([a, b]);
+    const merged = mergeGroupsByEquivalence(report, [
+      { aKey: "style", bKey: "formatting" },
+    ]);
+    expect(merged.groups).toHaveLength(1);
+    expect(merged.groups[0].status).toBe("conflict");
+    expect(merged.groups[0].score).toBeGreaterThan(0);
+  });
+
+  it("keeps the earliest first-seen key/headingPath as canonical", () => {
+    const a = parse("a.md", "# Style\nfoo\n");
+    const b = parse("b.md", "# Formatting\nfoo\n");
+    const report = buildDriftReport([a, b]);
+    // Swap order in equivalence — canonical should still be `style` (first-seen).
+    const merged = mergeGroupsByEquivalence(report, [
+      { aKey: "formatting", bKey: "style" },
+    ]);
+    expect(merged.groups[0].key).toBe("style");
+    expect(merged.groups[0].headingPath).toEqual(["Style"]);
+  });
+
+  it("transitively unions three groups from two pairs", () => {
+    const a = parse("a.md", "# Style\nfoo\n");
+    const b = parse("b.md", "# Formatting\nfoo\n");
+    const c = parse("c.md", "# Conventions\nfoo\n");
+    const report = buildDriftReport([a, b, c]);
+    expect(report.groups).toHaveLength(3);
+
+    const merged = mergeGroupsByEquivalence(report, [
+      { aKey: "style", bKey: "formatting" },
+      { aKey: "formatting", bKey: "conventions" },
+    ]);
+    expect(merged.groups).toHaveLength(1);
+    expect(merged.groups[0].members.map((m) => m.source).sort()).toEqual([
+      "a.md",
+      "b.md",
+      "c.md",
+    ]);
+    expect(merged.groups[0].status).toBe("aligned");
+  });
+
+  it("ignores equivalence pairs referencing unknown keys", () => {
+    const a = parse("a.md", "# Style\nfoo\n");
+    const b = parse("b.md", "# Formatting\nfoo\n");
+    const report = buildDriftReport([a, b]);
+    const merged = mergeGroupsByEquivalence(report, [
+      { aKey: "style", bKey: "ghost" },
+      { aKey: "phantom", bKey: "formatting" },
+    ]);
+    // Nothing to merge — two groups remain.
+    expect(merged.groups).toHaveLength(2);
+  });
+});
+

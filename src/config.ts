@@ -39,6 +39,30 @@ export interface RuleHerderConfig {
     /** Body-similarity threshold above which two blocks count as "reworded". Default 0.6. */
     reworded?: number;
   };
+  /**
+   * Optional opt-in LLM block-matcher settings. **The LLM matcher is never
+   * invoked unless `llm.enabled` is `true` here OR the caller passes
+   * `--llm-match` explicitly on the CLI.** This is a deliberate belt-and-braces
+   * default so config alone can never accidentally start making network calls
+   * on someone else's machine (e.g. a checked-in `.ruleherder.json`).
+   */
+  llm?: {
+    /** Opt-in switch. Default `false`. */
+    enabled?: boolean;
+    /** OpenAI-compatible chat/completions URL. Env: `RULE_HERDER_LLM_URL`. */
+    url?: string;
+    /** Model identifier sent in the request body. Env: `RULE_HERDER_LLM_MODEL`. */
+    model?: string;
+    /**
+     * API key. Env: `RULE_HERDER_LLM_KEY`. Optional — many local backends
+     * (Ollama, LM Studio, llama.cpp) do not require one.
+     */
+    apiKey?: string;
+    /** Drop matches under this confidence (0..1). Default 0.7. */
+    minConfidence?: number;
+    /** Max candidate pairs per run. Default 50. */
+    maxCandidates?: number;
+  };
 }
 
 export const CONFIG_FILENAME = ".ruleherder.json";
@@ -49,11 +73,27 @@ export const DEFAULT_CONFIG: {
   ignore: readonly string[];
   aliases: Record<string, string[]>;
   thresholds: { drift: number; reworded: number };
+  llm: {
+    enabled: boolean;
+    url: string | null;
+    model: string | null;
+    apiKey: string | null;
+    minConfidence: number;
+    maxCandidates: number;
+  };
 } = {
   files: DEFAULT_AGENT_FILES,
   ignore: [],
   aliases: {},
   thresholds: { drift: 0.2, reworded: 0.6 },
+  llm: {
+    enabled: false,
+    url: null,
+    model: null,
+    apiKey: null,
+    minConfidence: 0.7,
+    maxCandidates: 50,
+  },
 };
 
 export interface LoadedConfig {
@@ -65,6 +105,15 @@ export interface LoadedConfig {
   aliases: Record<string, string[]>;
   /** Effective thresholds (defaults applied). */
   thresholds: { drift: number; reworded: number };
+  /** Effective LLM matcher settings (defaults applied). */
+  llm: {
+    enabled: boolean;
+    url: string | null;
+    model: string | null;
+    apiKey: string | null;
+    minConfidence: number;
+    maxCandidates: number;
+  };
   /** Absolute path of the loaded config file, or null when defaults are used. */
   configPath: string | null;
 }
@@ -74,6 +123,20 @@ function asStringArray(v: unknown, field: string): string[] {
     throw new TypeError(`${CONFIG_FILENAME}: "${field}" must be a string array`);
   }
   return v as string[];
+}
+
+function asBoolean(v: unknown, field: string): boolean {
+  if (typeof v !== "boolean") {
+    throw new TypeError(`${CONFIG_FILENAME}: "${field}" must be a boolean`);
+  }
+  return v;
+}
+
+function asString(v: unknown, field: string): string {
+  if (typeof v !== "string") {
+    throw new TypeError(`${CONFIG_FILENAME}: "${field}" must be a string`);
+  }
+  return v;
 }
 
 function asNumber(v: unknown, field: string): number {
@@ -114,6 +177,29 @@ export function validateConfig(raw: unknown): RuleHerderConfig {
     out.thresholds = {};
     if (t.drift !== undefined) out.thresholds.drift = asNumber(t.drift, "thresholds.drift");
     if (t.reworded !== undefined) out.thresholds.reworded = asNumber(t.reworded, "thresholds.reworded");
+  }
+  if (obj.llm !== undefined) {
+    if (obj.llm === null || typeof obj.llm !== "object" || Array.isArray(obj.llm)) {
+      throw new TypeError(`${CONFIG_FILENAME}: "llm" must be an object`);
+    }
+    const l = obj.llm as Record<string, unknown>;
+    out.llm = {};
+    if (l.enabled !== undefined) out.llm.enabled = asBoolean(l.enabled, "llm.enabled");
+    if (l.url !== undefined) out.llm.url = asString(l.url, "llm.url");
+    if (l.model !== undefined) out.llm.model = asString(l.model, "llm.model");
+    if (l.apiKey !== undefined) out.llm.apiKey = asString(l.apiKey, "llm.apiKey");
+    if (l.minConfidence !== undefined) {
+      out.llm.minConfidence = asNumber(l.minConfidence, "llm.minConfidence");
+    }
+    if (l.maxCandidates !== undefined) {
+      const n = asNumber(l.maxCandidates, "llm.maxCandidates");
+      if (!Number.isInteger(n) || n < 1) {
+        throw new TypeError(
+          `${CONFIG_FILENAME}: "llm.maxCandidates" must be a positive integer`,
+        );
+      }
+      out.llm.maxCandidates = n;
+    }
   }
   return out;
 }
@@ -187,6 +273,16 @@ export async function loadConfig(
     drift: parsed.thresholds?.drift ?? DEFAULT_CONFIG.thresholds.drift,
     reworded: parsed.thresholds?.reworded ?? DEFAULT_CONFIG.thresholds.reworded,
   };
+  const llm = {
+    enabled: parsed.llm?.enabled ?? DEFAULT_CONFIG.llm.enabled,
+    url: parsed.llm?.url ?? DEFAULT_CONFIG.llm.url,
+    model: parsed.llm?.model ?? DEFAULT_CONFIG.llm.model,
+    apiKey: parsed.llm?.apiKey ?? DEFAULT_CONFIG.llm.apiKey,
+    minConfidence:
+      parsed.llm?.minConfidence ?? DEFAULT_CONFIG.llm.minConfidence,
+    maxCandidates:
+      parsed.llm?.maxCandidates ?? DEFAULT_CONFIG.llm.maxCandidates,
+  };
 
-  return { files, ignore, aliases, thresholds, configPath };
+  return { files, ignore, aliases, thresholds, llm, configPath };
 }
