@@ -6,6 +6,7 @@ import { detectAgentFiles } from "./detect.js";
 import { parseBlocks } from "./parse.js";
 import { buildDriftReport } from "./match.js";
 import { renderHuman, renderJson } from "./report.js";
+import { renderHtml, renderMarkdown } from "./render.js";
 import { loadConfig, type LoadedConfig } from "./config.js";
 import {
   planHerd,
@@ -354,6 +355,70 @@ export function buildProgram(): Command {
     });
 
   program
+    .command("report")
+    .description(
+      "render a static drift-report artifact (HTML or markdown) for PR reviewers",
+    )
+    .option("--cwd <path>", "directory to scan", process.cwd())
+    .option("--config <path>", "path to a .ruleherder.json (defaults to cwd)")
+    .option(
+      "--format <fmt>",
+      "output format: html|md (default html)",
+      (v: string) => {
+        if (v !== "html" && v !== "md")
+          throw new Error(`invalid --format '${v}'. Expected html|md.`);
+        return v as "html" | "md";
+      },
+      "html",
+    )
+    .option(
+      "--out <path>",
+      "output file (defaults to rule-herder-report.html or .md)",
+    )
+    .option("--stdout", "print to stdout instead of writing a file", false)
+    .option(
+      "--include-aligned",
+      "include aligned (non-drifted) groups in the artifact",
+      false,
+    )
+    .option(
+      "--threshold <n>",
+      "drift threshold shown in the summary; cosmetic (report never gates CI). Overrides config.",
+      (v) => Number(v),
+    )
+    .option(
+      "--llm-match",
+      "opt in to LLM-assisted matching (see `diff --llm-match` for details).",
+      false,
+    )
+    .option(
+      "--llm-url <url>",
+      "OpenAI-compatible chat/completions URL. Also RULE_HERDER_LLM_URL.",
+    )
+    .option(
+      "--llm-model <name>",
+      "Model name to send in the request body. Also RULE_HERDER_LLM_MODEL.",
+    )
+    .option(
+      "--llm-key <key>",
+      "API key. Also RULE_HERDER_LLM_KEY.",
+    )
+    .option(
+      "--llm-min-confidence <n>",
+      "drop LLM matches below this confidence (0..1). Default 0.7.",
+      (v) => Number(v),
+    )
+    .option(
+      "--llm-max-candidates <n>",
+      "cap LLM candidate pairs per run. Default 50.",
+      (v) => Number(v),
+    )
+    .action(async (opts: ReportOptions) => {
+      const code = await runReport(opts);
+      process.exitCode = code;
+    });
+
+  program
     .command("config")
     .description("print the effective rule-herder config")
     .option("--cwd <path>", "directory to scan", process.cwd())
@@ -364,6 +429,124 @@ export function buildProgram(): Command {
     });
 
   return program;
+}
+
+export interface ReportOptions {
+  cwd: string;
+  config?: string;
+  format?: "html" | "md";
+  out?: string;
+  stdout?: boolean;
+  includeAligned?: boolean;
+  threshold?: number;
+  llmMatch?: boolean;
+  llmUrl?: string;
+  llmModel?: string;
+  llmKey?: string;
+  llmMinConfidence?: number;
+  llmMaxCandidates?: number;
+  llmProviderOverride?: LLMProvider;
+  /** Injected in tests to freeze the timestamp in the artifact. */
+  now?: string;
+}
+
+/**
+ * Render a static drift report artifact (HTML or markdown) to disk or stdout.
+ *
+ * Unlike `diff`, this command never gates CI — it always exits 0 on success,
+ * and only returns non-zero when the file can't be written. The intent is to
+ * produce a reviewer-friendly artifact that a PR reviewer can browse without
+ * scrolling CI logs (paired with `actions/upload-artifact` in the GitHub
+ * Action).
+ */
+export async function runReport(opts: ReportOptions): Promise<number> {
+  const cfg = await loadEffectiveConfig(opts.cwd, opts.config);
+  const ignore = new Set(cfg.ignore);
+  const files = (
+    await detectAgentFiles({ cwd: opts.cwd, candidates: cfg.files })
+  ).filter((f) => !ignore.has(f.relPath));
+
+  const threshold = Number.isFinite(opts.threshold)
+    ? (opts.threshold as number)
+    : cfg.thresholds.drift;
+
+  let report: import("./match.js").DriftReport = {
+    sources: [],
+    groups: [],
+    pairs: [],
+    overall: 0,
+  };
+  if (files.length > 0) {
+    const inputs = await Promise.all(
+      files.map(async (f) => {
+        const text = await fs.readFile(f.absPath, "utf8");
+        const blocks = parseBlocks(f.relPath, text, {
+          plain: isPlainRulesFile(f.relPath),
+        });
+        return { source: f.relPath, blocks };
+      }),
+    );
+    report = buildDriftReport(inputs, {
+      rewordedThreshold: cfg.thresholds.reworded,
+      aliases: cfg.aliases,
+    });
+    // Reuse the same opt-in LLM enrichment as `diff` so both commands agree
+    // on which groups exist / what status they carry.
+    const llmResult = await maybeEnrichWithLLM(
+      report,
+      {
+        cwd: opts.cwd,
+        llmMatch: opts.llmMatch,
+        llmUrl: opts.llmUrl,
+        llmModel: opts.llmModel,
+        llmKey: opts.llmKey,
+        llmMinConfidence: opts.llmMinConfidence,
+        llmMaxCandidates: opts.llmMaxCandidates,
+        llmProviderOverride: opts.llmProviderOverride,
+      },
+      cfg,
+    );
+    if (llmResult) report = llmResult.report;
+  }
+
+  const format = opts.format ?? "html";
+  const rendered =
+    format === "md"
+      ? renderMarkdown(report, {
+          includeAligned: opts.includeAligned === true,
+          threshold,
+          generatedAt: opts.now,
+        })
+      : renderHtml(report, {
+          includeAligned: opts.includeAligned === true,
+          threshold,
+          generatedAt: opts.now,
+        });
+
+  if (opts.stdout) {
+    process.stdout.write(rendered);
+    return 0;
+  }
+
+  const outPath =
+    opts.out ?? (format === "md" ? "rule-herder-report.md" : "rule-herder-report.html");
+  try {
+    await fs.writeFile(outPath, rendered, "utf8");
+  } catch (err) {
+    process.stderr.write(
+      pc.red(
+        `rule-herder: failed to write ${outPath}: ${(err as Error).message}\n`,
+      ),
+    );
+    return 1;
+  }
+  process.stdout.write(
+    pc.bold(`🐕 wrote ${format} report to ${outPath}\n`) +
+      pc.dim(
+        `   ${report.sources.length} file${report.sources.length === 1 ? "" : "s"}, ${report.groups.length} block${report.groups.length === 1 ? "" : "s"}, overall drift ${report.overall.toFixed(2)}\n`,
+      ),
+  );
+  return 0;
 }
 
 export interface HerdCliOptions {

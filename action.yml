@@ -34,6 +34,22 @@ inputs:
     description: "When false, never fail the job even if drift exceeds the threshold."
     required: false
     default: "true"
+  upload-report:
+    description: "When true, run `rule-herder report` and upload the artifact via actions/upload-artifact@v4."
+    required: false
+    default: "false"
+  report-format:
+    description: "Report format when upload-report is true: 'html' or 'md'."
+    required: false
+    default: "html"
+  report-name:
+    description: "Artifact name used by actions/upload-artifact when upload-report is true."
+    required: false
+    default: "rule-herder-report"
+  report-include-aligned:
+    description: "Pass --include-aligned to `rule-herder report` when uploading."
+    required: false
+    default: "false"
   node-version:
     description: "Node.js version to set up. Set to 'skip' to reuse an existing Node install."
     required: false
@@ -46,6 +62,9 @@ outputs:
   report:
     description: "Captured stdout of the drift report."
     value: ${{ steps.run.outputs.report }}
+  report-path:
+    description: "Filesystem path to the uploaded drift report artifact (empty when upload-report is 'false')."
+    value: ${{ steps.report.outputs.report-path }}
 
 runs:
   using: "composite"
@@ -150,3 +169,55 @@ runs:
           echo "::error::rule-herder reported drift (exit ${RH_EXIT})."
           exit "${RH_EXIT}"
         fi
+
+    - name: Render rule-herder report artifact
+      id: report
+      if: ${{ always() && inputs.upload-report == 'true' }}
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        RH_VERSION: ${{ inputs.version }}
+        RH_CONFIG: ${{ inputs.config }}
+        RH_REPORT_FORMAT: ${{ inputs.report-format }}
+        RH_REPORT_INCLUDE_ALIGNED: ${{ inputs.report-include-aligned }}
+        RH_THRESHOLD: ${{ inputs.threshold }}
+      run: |
+        set -uo pipefail
+
+        case "${RH_REPORT_FORMAT}" in
+          html|md) : ;;
+          *) echo "::error::report-format must be 'html' or 'md' (got '${RH_REPORT_FORMAT}')." ; exit 1 ;;
+        esac
+
+        out_path="rule-herder-report.${RH_REPORT_FORMAT}"
+        args=("report" "--format" "${RH_REPORT_FORMAT}" "--out" "${out_path}")
+        if [ -n "${RH_CONFIG}" ]; then
+          args+=("--config" "${RH_CONFIG}")
+        fi
+        if [ -n "${RH_THRESHOLD}" ]; then
+          args+=("--threshold" "${RH_THRESHOLD}")
+        fi
+        if [ "${RH_REPORT_INCLUDE_ALIGNED}" = "true" ]; then
+          args+=("--include-aligned")
+        fi
+
+        if [ "${RH_VERSION}" = "local" ]; then
+          # `diff` step already installed & built in this working-directory.
+          cmd=(node ./dist/cli.js)
+        else
+          cmd=(npx -y "rule-herder@${RH_VERSION}")
+        fi
+
+        echo "::group::rule-herder ${args[*]}"
+        "${cmd[@]}" "${args[@]}"
+        echo "::endgroup::"
+
+        echo "report-path=${out_path}" >> "$GITHUB_OUTPUT"
+
+    - name: Upload rule-herder report artifact
+      if: ${{ always() && inputs.upload-report == 'true' && steps.report.outputs.report-path != '' }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.report-name }}
+        path: ${{ inputs.working-directory }}/${{ steps.report.outputs.report-path }}
+        if-no-files-found: error
