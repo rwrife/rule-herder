@@ -43,6 +43,8 @@ rule-herder diff           # report drift between them (M4 ✅)
 rule-herder diff --json    # machine-readable drift report
 rule-herder diff --threshold 0.3   # exit 1 when overall drift exceeds 0.3
 rule-herder diff --woof    # add escalating sheepdog commentary (cosmetic; ignored with --json)
+rule-herder diff --watch   # re-run drift on every save; live re-render (see "Watch mode" below)
+rule-herder watch          # sugar for `rule-herder diff --watch`
 rule-herder config         # print the effective config (M5 ✅)
 rule-herder herd           # dry-run reconcile: who would overwrite whom (M6, in progress)
 rule-herder herd --apply   # actually rewrite drifted blocks to the winner
@@ -93,6 +95,40 @@ instead of asking them to scroll CI logs. It reuses the exact `DriftReport` shap
 
 `report` never gates CI — it always exits 0 on success. Use `diff` when you want
 threshold-based failure.
+
+### Watch mode
+
+Editing agent files is an iterative loop — you tweak `AGENTS.md`, want to see what drifted
+from `CLAUDE.md`, tweak that, repeat. Running `rule-herder diff` by hand between saves is
+friction, so `diff` has a `--watch` mode (and a `watch` alias) that repaints the drift
+report whenever a detected agent file or `.ruleherder.json` changes.
+
+```bash
+rule-herder diff --watch
+rule-herder watch                            # sugar alias for the above
+rule-herder watch --watch-debounce 300       # coalesce editor-save bursts differently
+rule-herder watch --threshold 0.3 --woof     # threshold + escalating commentary each re-render
+```
+
+Behavior:
+
+- Prints an initial report immediately, then waits for changes.
+- Debounces change bursts (default `150ms`, configurable via `--watch-debounce <ms>`,
+  bounds `0..5000`).
+- On each re-render, prints a compact `🐕 watch — <delta since last run>` footer so you
+  can see what actually moved without eyeballing the whole table.
+- Clears the screen on TTY stdout; falls back to a `---` separator when `NO_COLOR=1`
+  or stdout isn't a TTY.
+- New agent files that appear (e.g. you just created `.cursorrules`) are picked up on
+  the next tick; files that vanish are dropped from the watch set.
+- `--watch` is **ignored with a warning when combined with `--json`** — JSON consumers
+  should call `diff` per invocation, not stream.
+- The LLM matcher is **not** invoked on every re-render even if `llm.enabled: true` in
+  config, unless you also pass `--llm-match` explicitly. Nobody wants a runaway API bill.
+- Ctrl+C exits cleanly.
+
+Exit code matches non-watch `diff`: 1 when the *most recent* overall drift exceeds the
+threshold, 0 otherwise.
 
 ## Configuration (M5 ✅)
 

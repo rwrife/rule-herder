@@ -21,6 +21,13 @@ import {
   type EnrichResult,
   type LLMProvider,
 } from "./llm.js";
+import {
+  Watcher,
+  formatDelta,
+  resolveDebounce,
+  WATCH_DEBOUNCE_DEFAULT_MS,
+  type ReportDelta,
+} from "./watch.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json") as { version: string };
@@ -91,6 +98,12 @@ export interface DiffOptions {
   llmMaxCandidates?: number;
   /** Injected in tests; when set, replaces the real provider entirely. */
   llmProviderOverride?: LLMProvider;
+  /** Watch mode: re-run on file changes. Incompatible with `json`. */
+  watch?: boolean;
+  /** Debounce window for watch mode (ms). */
+  watchDebounce?: number;
+  /** Test hook: exit the watch loop after N successful ticks. */
+  watchMaxTicks?: number;
 }
 
 function isPlainRulesFile(relPath: string): boolean {
@@ -98,33 +111,30 @@ function isPlainRulesFile(relPath: string): boolean {
   return !/\.md$/i.test(relPath);
 }
 
-export async function runDiff(opts: DiffOptions): Promise<number> {
-  const cfg = await loadEffectiveConfig(opts.cwd, opts.config);
+/**
+ * Detect + read + parse + match, returning the final drift report and any LLM
+ * enrichment metadata. Shared by `runDiff` and watch mode so both agree on the
+ * pipeline. Never renders — callers own stdout.
+ */
+async function computeDrift(
+  opts: DiffOptions,
+  cfg: LoadedConfig,
+): Promise<{
+  report: import("./match.js").DriftReport;
+  files: Array<{ relPath: string; absPath: string }>;
+  llmResult: (EnrichResult & { provider: string }) | null;
+}> {
   const ignore = new Set(cfg.ignore);
   const files = (
     await detectAgentFiles({ cwd: opts.cwd, candidates: cfg.files })
   ).filter((f) => !ignore.has(f.relPath));
-  const threshold = Number.isFinite(opts.threshold)
-    ? (opts.threshold as number)
-    : cfg.thresholds.drift;
 
   if (files.length === 0) {
-    if (opts.json) {
-      process.stdout.write(
-        renderJson(
-          { sources: [], groups: [], pairs: [], overall: 0 },
-          { threshold },
-        ),
-      );
-    } else {
-      process.stdout.write(
-        renderHuman(
-          { sources: [], groups: [], pairs: [], overall: 0 },
-          { noColor: opts.color === false, threshold },
-        ),
-      );
-    }
-    return 0;
+    return {
+      report: { sources: [], groups: [], pairs: [], overall: 0 },
+      files,
+      llmResult: null,
+    };
   }
 
   const inputs = await Promise.all(
@@ -143,7 +153,32 @@ export async function runDiff(opts: DiffOptions): Promise<number> {
   });
 
   const llmResult = await maybeEnrichWithLLM(report, opts, cfg);
-  const finalReport = llmResult?.report ?? report;
+  return {
+    report: llmResult?.report ?? report,
+    files,
+    llmResult,
+  };
+}
+
+export async function runDiff(opts: DiffOptions): Promise<number> {
+  const cfg = await loadEffectiveConfig(opts.cwd, opts.config);
+  const threshold = Number.isFinite(opts.threshold)
+    ? (opts.threshold as number)
+    : cfg.thresholds.drift;
+
+  if (opts.watch) {
+    if (opts.json) {
+      process.stderr.write(
+        pc.yellow(
+          "rule-herder: --watch is incompatible with --json (JSON consumers should call diff per-invocation, not stream); ignoring --watch.\n",
+        ),
+      );
+    } else {
+      return runWatch(opts, cfg, threshold);
+    }
+  }
+
+  const { report: finalReport, llmResult } = await computeDrift(opts, cfg);
 
   if (opts.json) {
     process.stdout.write(renderJson(finalReport, { threshold }));
@@ -169,6 +204,137 @@ export async function runDiff(opts: DiffOptions): Promise<number> {
   }
 
   return finalReport.overall > threshold ? 1 : 0;
+}
+
+/**
+ * Watch-mode driver. Repaints the drift report on every debounced change to
+ * a detected agent file (or `.ruleherder.json`). Never enriches with the LLM
+ * unless the caller explicitly opted in via `--llm-match` — polling an LLM on
+ * every save would be rude and expensive.
+ *
+ * Returns after the watcher exits (Ctrl+C or `watchMaxTicks` reached in
+ * tests). The exit code always reflects the *most recent* drift score against
+ * the threshold, matching non-watch `diff` behavior.
+ */
+async function runWatch(
+  opts: DiffOptions,
+  cfg: LoadedConfig,
+  threshold: number,
+): Promise<number> {
+  // In watch mode we deliberately suppress the LLM matcher on every tick
+  // *unless* the user was explicit on the CLI. Config-only `llm.enabled: true`
+  // gets a quiet downgrade so a background watcher can't rack up API calls
+  // without the user typing --llm-match.
+  const perTickOpts: DiffOptions = { ...opts };
+  if (opts.llmMatch !== true) {
+    // Copy cfg so we can flip llm.enabled off just for the per-tick path.
+    cfg = { ...cfg, llm: { ...cfg.llm, enabled: false } };
+  }
+
+  const debounceMs = resolveDebounce(opts.watchDebounce);
+  const noColor = opts.color === false;
+  const canClear = process.stdout.isTTY === true && !noColor && !process.env.NO_COLOR;
+  const c = canClear ? pc : { dim: (s: string) => s, bold: (s: string) => s };
+
+  let ticks = 0;
+  const maxTicks =
+    typeof opts.watchMaxTicks === "number" && opts.watchMaxTicks > 0
+      ? opts.watchMaxTicks
+      : null;
+  // Wrap in an object so TS doesn't narrow the type down to `null` based on
+  // the initializer alone — the widening happens inside a Watcher callback.
+  const state: { lastReport: import("./match.js").DriftReport | null } = {
+    lastReport: null,
+  };
+
+  const watcher = new Watcher({
+    cwd: opts.cwd,
+    debounceMs,
+    listWatched: async () => {
+      const ignore = new Set(cfg.ignore);
+      const files = await detectAgentFiles({
+        cwd: opts.cwd,
+        candidates: cfg.files,
+      });
+      return files
+        .filter((f) => !ignore.has(f.relPath))
+        .map((f) => f.relPath);
+    },
+    runTick: async () => {
+      const { report } = await computeDrift(perTickOpts, cfg);
+      return report;
+    },
+    onTick: (report, delta) => {
+      if (canClear) {
+        // Full clear + home cursor. Matches `console.clear()` but doesn't
+        // rely on TTY.write returning success (some pipes lie).
+        process.stdout.write("\x1b[2J\x1b[H");
+      } else {
+        process.stdout.write("---\n");
+      }
+      process.stdout.write(
+        renderHuman(report, {
+          noColor,
+          threshold,
+          woof: opts.woof === true,
+        }),
+      );
+      renderWatchFooter(c, delta, state.lastReport === null, debounceMs);
+      state.lastReport = report;
+      ticks++;
+      if (maxTicks !== null && ticks >= maxTicks) {
+        watcher.close();
+      }
+    },
+    onError: (err) => {
+      process.stderr.write(
+        pc.red(`rule-herder: watch tick failed: ${err.message}\n`),
+      );
+    },
+  });
+
+  const cleanup = () => {
+    watcher.close();
+  };
+  // Best-effort clean exit on Ctrl+C. Node emits SIGINT to the whole process
+  // group so we don't need to re-throw — just stop watching.
+  process.once("SIGINT", cleanup);
+  process.once("SIGTERM", cleanup);
+
+  try {
+    await watcher.start();
+    // Wait until the watcher closes (SIGINT, watchMaxTicks in tests, etc.)
+    await new Promise<void>((resolve) => {
+      const done = () => resolve();
+      const check = () => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        if ((watcher as any).closed) done();
+        else setTimeout(check, 25);
+      };
+      check();
+    });
+  } finally {
+    process.off("SIGINT", cleanup);
+    process.off("SIGTERM", cleanup);
+    watcher.close();
+  }
+
+  const finalOverall: number = state.lastReport ? state.lastReport.overall : 0;
+  return finalOverall > threshold ? 1 : 0;
+}
+
+function renderWatchFooter(
+  c: { dim: (s: string) => string; bold: (s: string) => string },
+  delta: ReportDelta,
+  isFirst: boolean,
+  debounceMs: number,
+): void {
+  const summary = isFirst ? "initial run" : formatDelta(delta) || "no change since last run";
+  process.stdout.write(
+    c.dim(
+      `\n  🐕 watch — ${summary} · debounce ${debounceMs}ms · Ctrl+C to exit\n`,
+    ),
+  );
 }
 
 /**
@@ -240,7 +406,7 @@ export function buildProgram(): Command {
     .description("A sheepdog for your sprawl of AI agent context files.")
     .version(pkg.version, "-v, --version", "print the rule-herder version");
 
-  program
+  const diffCmd = program
     .command("diff")
     .description("diff detected agent files and report drift")
     .option("--cwd <path>", "directory to scan", process.cwd())
@@ -256,6 +422,16 @@ export function buildProgram(): Command {
       "--woof",
       "escalating sheepdog commentary. Cosmetic; ignored with --json.",
       false,
+    )
+    .option(
+      "--watch",
+      `re-run diff on file changes; incompatible with --json. Default debounce ${WATCH_DEBOUNCE_DEFAULT_MS}ms.`,
+      false,
+    )
+    .option(
+      "--watch-debounce <ms>",
+      `debounce window for --watch in ms (0..5000). Default ${WATCH_DEBOUNCE_DEFAULT_MS}.`,
+      (v) => Number(v),
     )
     .option(
       "--llm-match",
@@ -286,6 +462,54 @@ export function buildProgram(): Command {
     )
     .action(async (opts: DiffOptions) => {
       const code = await runDiff(opts);
+      process.exitCode = code;
+    });
+  void diffCmd;
+
+  // `watch` sugar alias: same code path as `diff --watch`, but easier to type.
+  program
+    .command("watch")
+    .description(
+      "re-run diff on file changes; sugar for `rule-herder diff --watch`",
+    )
+    .option("--cwd <path>", "directory to scan", process.cwd())
+    .option("--no-color", "disable ANSI color in human output")
+    .option("--config <path>", "path to a .ruleherder.json (defaults to cwd)")
+    .option(
+      "--threshold <n>",
+      "overall drift threshold; exit 1 when exceeded (0..1). Overrides config.",
+      (v) => Number(v),
+    )
+    .option(
+      "--woof",
+      "escalating sheepdog commentary each re-render.",
+      false,
+    )
+    .option(
+      "--watch-debounce <ms>",
+      `debounce window in ms (0..5000). Default ${WATCH_DEBOUNCE_DEFAULT_MS}.`,
+      (v) => Number(v),
+    )
+    .option(
+      "--llm-match",
+      "opt in to LLM matching per re-render (see `diff --llm-match`).",
+      false,
+    )
+    .option("--llm-url <url>", "OpenAI-compatible URL. Also RULE_HERDER_LLM_URL.")
+    .option("--llm-model <name>", "Model name. Also RULE_HERDER_LLM_MODEL.")
+    .option("--llm-key <key>", "API key. Also RULE_HERDER_LLM_KEY.")
+    .option(
+      "--llm-min-confidence <n>",
+      "drop LLM matches below this confidence.",
+      (v) => Number(v),
+    )
+    .option(
+      "--llm-max-candidates <n>",
+      "cap LLM candidate pairs per run.",
+      (v) => Number(v),
+    )
+    .action(async (opts: DiffOptions) => {
+      const code = await runDiff({ ...opts, watch: true });
       process.exitCode = code;
     });
 
