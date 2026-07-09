@@ -33,3 +33,5 @@ jobs:
           threshold: "0.2"       # fail when overall drift exceeds 0.2
           comment-on-pr: "true"  # leave a sticky 🐕 comment on the PR
           fail-on-drift: "true"  # set to 'false' to comment without failing CI
+          upload-report: "true"  # also upload a browsable drift-report artifact
+          report-format: "html"  # or 'md'; artifact name is 'rule-herder-report' by default

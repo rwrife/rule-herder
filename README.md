@@ -50,6 +50,10 @@ rule-herder herd --pick longest --apply        # pick longest body as winner
 rule-herder herd --pick source=AGENTS.md --apply  # pick a specific file as truth
 rule-herder herd --target CLAUDE.md --apply    # only rewrite this target file
 rule-herder herd --apply --backup              # write <file>.bak before overwriting
+rule-herder report                             # write rule-herder-report.html (browsable drift artifact)
+rule-herder report --format md --out drift.md  # markdown flavor, e.g. for PR bodies
+rule-herder report --stdout --format md        # print to stdout instead of a file
+rule-herder report --include-aligned           # include aligned groups in the artifact
 ```
 
 `scan` looks for the known agent files in the cwd:
@@ -71,6 +75,24 @@ block body to match. Defaults are safe — dry-run unless `--apply`, and `--back
 Only `conflict` and `reworded` groups are touched. `missing` groups (rule present in only
 one source) are reported in the skipped list and left alone — auto-inserting new blocks is
 the interactive TUI's job.
+
+### Reports
+
+`rule-herder report` renders a static drift-report artifact you can hand to PR reviewers
+instead of asking them to scroll CI logs. It reuses the exact `DriftReport` shape as
+`diff --json`, so both surfaces always agree.
+
+- `--format html` (default) — a single, self-contained HTML file with inlined CSS. No
+  external scripts, no external stylesheets; open it straight from the downloaded
+  artifact.
+- `--format md` — plain markdown suitable for pasting into a PR body or a docs site.
+- `--out <path>` — defaults to `rule-herder-report.html` (or `.md`).
+- `--include-aligned` — include non-drifted groups too (off by default; reviewers usually
+  only care what drifted).
+- `--stdout` — print the artifact instead of writing a file (handy for piping).
+
+`report` never gates CI — it always exits 0 on success. Use `diff` when you want
+threshold-based failure.
 
 ## Configuration (M5 ✅)
 
@@ -146,9 +168,15 @@ for a copy-pasteable workflow. Action inputs:
 | `json` | `false` | Emit `--json` (still fails on drift). |
 | `comment-on-pr` | `false` | Post / update a sticky drift comment on the PR. |
 | `fail-on-drift` | `true` | Set to `false` to report without failing the job. |
+| `upload-report` | `false` | Also render `rule-herder report` and upload it via `actions/upload-artifact@v4`. Runs even when drift fails the job so reviewers can see what broke. |
+| `report-format` | `html` | `html` or `md`, forwarded to `report --format`. |
+| `report-name` | `rule-herder-report` | Artifact name used by `actions/upload-artifact`. |
+| `report-include-aligned` | `false` | When `true`, adds `--include-aligned` to the render step. |
 | `node-version` | `20` | `actions/setup-node` version. Use `skip` to reuse an existing Node. |
 
-Outputs: `exit-code` (the `rule-herder diff` exit status) and `report` (captured stdout).
+Outputs: `exit-code` (the `rule-herder diff` exit status), `report` (captured stdout of
+the drift report), and `report-path` (path to the uploaded artifact, or empty when
+`upload-report: false`).
 
 ### pre-commit hook
 
